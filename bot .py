@@ -308,6 +308,9 @@ async def reset(interaction: discord.Interaction):
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise ValueError("No DISCORD_TOKEN environment variable set!")
 
 bot.run(TOKEN)
