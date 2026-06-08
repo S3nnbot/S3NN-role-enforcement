@@ -41,6 +41,18 @@ def save_guild_config(guild_id: int, guild_config: dict):
     config[str(guild_id)] = guild_config
     save_config(config)
 
+def get_role_name(entry):
+    """Supports both old string entries and new dict entries with rank."""
+    if isinstance(entry, dict):
+        return entry["role"]
+    return entry
+
+def get_role_rank(entry):
+    """Returns rank for sorting. Old string entries default to 0."""
+    if isinstance(entry, dict):
+        return entry.get("rank", 0)
+    return 0
+
 # ── Bot setup ────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -80,8 +92,8 @@ async def enforce_single_path(member: discord.Member) -> None:
     if active_path is None:
         return
 
-    all_cultivation_lower = {role.lower() for p in paths.values() for role in p}
-    allowed_lower = {role.lower() for role in paths.get(active_path, [])}
+    all_cultivation_lower = {get_role_name(e).lower() for p in paths.values() for e in p}
+    allowed_lower = {get_role_name(e).lower() for e in paths.get(active_path, [])}
 
     roles_to_remove = [
         r for r in member.roles
@@ -142,6 +154,7 @@ async def help(interaction: discord.Interaction):
         color=discord.Color.dark_grey()
     )
     embed.add_field(name="🔧 Admin Commands", value="`/setup` `/setpath` `/addrole` `/removepath` `/removerole` `/viewpaths` `/enforce` `/setmessages` `/setlog` `/reset`", inline=False)
+    embed.add_field(name="👤 Member Commands", value="`/profile` `/pathstats` `/leaderboard`", inline=False)
     embed.add_field(name="📨 Invite S3NN", value=f"[Click here to invite S3NN]({INVITE_LINK})", inline=False)
     embed.set_footer(text="All admin commands are only visible to administrators.")
     await interaction.response.send_message(embed=embed)
@@ -164,11 +177,13 @@ async def setup(interaction: discord.Interaction):
 
 **1. Register your base roles** (the roles members choose from):
 `/setpath base_role:Role Name path_name:internal_name`
-*Example: `/setpath base_role:Warriors path_name:warriors`*
+*Example: `/setpath base_role:Demonic Path path_name:demonic`*
 
-**2. Add level roles to each path:**
-`/addrole path_name:internal_name role:Role Name`
-*Example: `/addrole path_name:warriors role:Recruit`*
+**2. Add level roles to each path (with rank):**
+`/addrole path_name:internal_name role:Role Name rank:1`
+The `rank` number determines leaderboard order — use 1 for the lowest level and 5 for the highest.
+*Example: `/addrole path_name:demonic role:Demon Initiate rank:1`*
+*Example: `/addrole path_name:demonic role:Demon Lord rank:5`*
 
 **3. Set a log channel (optional):**
 `/setlog channel:#your-channel`
@@ -176,19 +191,22 @@ async def setup(interaction: discord.Interaction):
 **4. Customize enforce messages (optional):**
 `/setmessages enforcing:Your message here done:Your done message`
 
-**5. View your current setup:**
+**5. Set a color per path (optional):**
+`/setpathcolor path_name:demonic hex_color:#FF0000`
+
+**6. View your current setup:**
 `/viewpaths`
 
-**6. Run enforcement manually:**
+**7. Run enforcement manually:**
 `/enforce`
 
-**7. Fix a specific member:**
+**8. Fix a specific member:**
 `/verify member:@someone`
 
-**8. Reset everything and start over:**
+**9. Reset everything and start over:**
 `/reset`
 
-**Member commands:** `/profile` `/whois` `/pathstats`
+**Member commands:** `/profile` `/pathstats` `/leaderboard`
 
 Make sure the **S3NN role is above all managed roles** in Server Settings → Roles!"""
     await interaction.response.send_message(msg, ephemeral=True)
@@ -205,7 +223,7 @@ async def setlog(interaction: discord.Interaction, channel: discord.TextChannel)
 
 
 @bot.tree.command(name="setpath", description="Register a base path role")
-@app_commands.describe(base_role="The base role name", path_name="Internal path name (e.g. warriors)")
+@app_commands.describe(base_role="The base role name", path_name="Internal path name (e.g. demonic)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setpath(interaction: discord.Interaction, base_role: str, path_name: str):
     guild_config = get_guild_config(interaction.guild.id)
@@ -217,16 +235,21 @@ async def setpath(interaction: discord.Interaction, base_role: str, path_name: s
 
 
 @bot.tree.command(name="addrole", description="Add a level role to a path")
-@app_commands.describe(path_name="Internal path name", role="The role name to add")
+@app_commands.describe(path_name="Internal path name", role="The role name to add", rank="Rank of this role (1 = lowest, 5 = highest)")
 @app_commands.checks.has_permissions(administrator=True)
-async def addrole(interaction: discord.Interaction, path_name: str, role: str):
+async def addrole(interaction: discord.Interaction, path_name: str, role: str, rank: int):
     guild_config = get_guild_config(interaction.guild.id)
     if path_name not in guild_config["paths"]:
         guild_config["paths"][path_name] = []
-    if role not in guild_config["paths"][path_name]:
-        guild_config["paths"][path_name].append(role)
+
+    # Remove any existing entry for this role name (case-insensitive) to avoid duplicates
+    guild_config["paths"][path_name] = [
+        e for e in guild_config["paths"][path_name]
+        if get_role_name(e).lower() != role.lower()
+    ]
+    guild_config["paths"][path_name].append({"role": role, "rank": rank})
     save_guild_config(interaction.guild.id, guild_config)
-    await interaction.response.send_message(f"✅ Role **{role}** added to path **{path_name}**.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Role **{role}** added to path **{path_name}** at rank **{rank}**.", ephemeral=True)
 
 
 @bot.tree.command(name="removepath", description="Remove a base path role")
@@ -247,12 +270,15 @@ async def removepath(interaction: discord.Interaction, base_role: str):
 @app_commands.checks.has_permissions(administrator=True)
 async def removerole(interaction: discord.Interaction, path_name: str, role: str):
     guild_config = get_guild_config(interaction.guild.id)
-    if path_name in guild_config["paths"] and role in guild_config["paths"][path_name]:
-        guild_config["paths"][path_name].remove(role)
-        save_guild_config(interaction.guild.id, guild_config)
-        await interaction.response.send_message(f"✅ Role **{role}** removed from path **{path_name}**.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"❌ Role **{role}** not found in path **{path_name}**.", ephemeral=True)
+    if path_name in guild_config["paths"]:
+        original = guild_config["paths"][path_name]
+        updated = [e for e in original if get_role_name(e).lower() != role.lower()]
+        if len(updated) < len(original):
+            guild_config["paths"][path_name] = updated
+            save_guild_config(interaction.guild.id, guild_config)
+            await interaction.response.send_message(f"✅ Role **{role}** removed from path **{path_name}**.", ephemeral=True)
+            return
+    await interaction.response.send_message(f"❌ Role **{role}** not found in path **{path_name}**.", ephemeral=True)
 
 
 @bot.tree.command(name="viewpaths", description="View all configured paths and roles")
@@ -268,8 +294,12 @@ async def viewpaths(interaction: discord.Interaction):
 
     msg = "**Current Path Configuration:**\n\n"
     for base_role, path_name in base_roles.items():
-        roles = paths.get(path_name, [])
-        roles_str = ", ".join(roles) if roles else "No roles added yet"
+        entries = paths.get(path_name, [])
+        sorted_entries = sorted(entries, key=get_role_rank)
+        if sorted_entries:
+            roles_str = ", ".join(f"{get_role_name(e)} (rank {get_role_rank(e)})" for e in sorted_entries)
+        else:
+            roles_str = "No roles added yet"
         msg += f"**{base_role}** (`{path_name}`)\n{roles_str}\n\n"
 
     await interaction.response.send_message(msg, ephemeral=True)
@@ -347,41 +377,6 @@ async def pathstats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="whois", description="Show a member's current path and level role")
-@app_commands.describe(member="The member to look up")
-async def whois(interaction: discord.Interaction, member: discord.Member):
-    guild_config = get_guild_config(interaction.guild.id)
-    base_roles = guild_config.get("base_roles", {})
-    paths = guild_config.get("paths", {})
-
-    member_role_names_lower = {r.name.lower() for r in member.roles}
-
-    active_path = None
-    active_base_role = None
-    for base_role, path in base_roles.items():
-        if base_role.lower() in member_role_names_lower:
-            active_path = path
-            active_base_role = base_role
-            break
-
-    if not active_path:
-        await interaction.response.send_message(f"❌ **{member.display_name}** has no path assigned.", ephemeral=True)
-        return
-
-    path_roles = paths.get(active_path, [])
-    highest_role = None
-    for role in reversed(path_roles):
-        if role.lower() in member_role_names_lower:
-            highest_role = role
-            break
-
-    embed = discord.Embed(title=f"{member.display_name}", color=discord.Color.dark_grey())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Path", value=active_base_role, inline=True)
-    embed.add_field(name="Highest Role", value=highest_role if highest_role else "None", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-
 @bot.tree.command(name="profile", description="Show a member's full path profile")
 @app_commands.describe(member="The member to view (leave empty for yourself)")
 async def profile(interaction: discord.Interaction, member: discord.Member = None):
@@ -407,14 +402,14 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
     if not active_path:
         embed.add_field(name="⚔️ Path", value="No path assigned", inline=True)
     else:
-        path_roles = paths.get(active_path, [])
-        highest_role = None
-        for role in reversed(path_roles):
-            if role.lower() in member_role_names_lower:
-                highest_role = role
-                break
+        path_entries = paths.get(active_path, [])
+        highest_entry = None
+        for entry in path_entries:
+            role_name = get_role_name(entry)
+            if role_name.lower() in member_role_names_lower:
+                if highest_entry is None or get_role_rank(entry) > get_role_rank(highest_entry):
+                    highest_entry = entry
 
-        # Get saved path color
         path_colors = guild_config.get("path_colors", {})
         hex_color = path_colors.get(active_path)
         if hex_color:
@@ -427,7 +422,7 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
         embed.color = color
 
         embed.add_field(name="⚔️ Path", value=active_base_role, inline=True)
-        embed.add_field(name="🏆 Highest Role", value=highest_role if highest_role else "None", inline=True)
+        embed.add_field(name="🏆 Highest Role", value=get_role_name(highest_entry) if highest_entry else "None", inline=True)
 
     await interaction.response.send_message(embed=embed)
 
@@ -448,6 +443,80 @@ async def setpathcolor(interaction: discord.Interaction, path_name: str, hex_col
     guild_config["path_colors"][path_name] = hex_color.strip("#")
     save_guild_config(interaction.guild.id, guild_config)
     await interaction.response.send_message(f"✅ Color for path **{path_name}** set to `#{hex_color.strip('#')}`.", ephemeral=True)
+
+
+@bot.tree.command(name="leaderboard", description="Show top cultivators ranked by level in each path")
+@app_commands.describe(path_name="Filter by a specific path (leave empty for all paths)")
+async def leaderboard(interaction: discord.Interaction, path_name: str = None):
+    guild_config = get_guild_config(interaction.guild.id)
+    base_roles = guild_config.get("base_roles", {})
+    paths = guild_config.get("paths", {})
+
+    if not base_roles:
+        await interaction.response.send_message("❌ No paths configured yet.", ephemeral=True)
+        return
+
+    # Build reverse lookup: path_name -> base_role display name
+    path_to_base_role = {v: k for k, v in base_roles.items()}
+
+    # Filter to specific path if provided
+    if path_name:
+        if path_name not in paths:
+            await interaction.response.send_message(f"❌ Path **{path_name}** not found.", ephemeral=True)
+            return
+        paths_to_show = {path_name: paths[path_name]}
+    else:
+        paths_to_show = paths
+
+    embed = discord.Embed(title="🏆 Cultivation Leaderboard", color=discord.Color.dark_grey())
+
+    for pname, entries in paths_to_show.items():
+        if not entries:
+            continue
+
+        # Build a dict of role_name_lower -> rank for quick lookup
+        role_rank_map = {get_role_name(e).lower(): get_role_rank(e) for e in entries}
+
+        # Score each member: find their highest ranked role in this path
+        scored = []
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            member_role_names_lower = {r.name.lower() for r in member.roles}
+            best_rank = 0
+            best_role_name = None
+            for role_lower, rank in role_rank_map.items():
+                if role_lower in member_role_names_lower and rank > best_rank:
+                    best_rank = rank
+                    best_role_name = role_lower
+            if best_role_name:
+                # Get the display name of the role (original casing)
+                display_role = next(
+                    (get_role_name(e) for e in entries if get_role_name(e).lower() == best_role_name),
+                    best_role_name
+                )
+                scored.append((member.display_name, display_role, best_rank))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+        top = scored[:5]
+
+        if not top:
+            continue
+
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        lines = []
+        for i, (name, role, rank) in enumerate(top):
+            lines.append(f"{medals[i]} **{name}** — {role}")
+
+        base_role_display = path_to_base_role.get(pname, pname)
+        embed.add_field(name=f"⚔️ {base_role_display}", value="\n".join(lines), inline=False)
+
+    if not embed.fields:
+        await interaction.response.send_message("❌ No members with ranked roles found.", ephemeral=True)
+        return
+
+    embed.set_footer(text="Rankings based on highest assigned level role per path.")
+    await interaction.response.send_message(embed=embed)
 
 
 # ── Run ──────────────────────────────────────────────────────────────────────
