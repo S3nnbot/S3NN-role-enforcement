@@ -468,7 +468,7 @@ async def leaderboard(interaction: discord.Interaction, path_name: str = None):
     else:
         paths_to_show = paths
 
-    embed = discord.Embed(title="🏆 Cultivation Leaderboard", color=discord.Color.dark_grey())
+    embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.dark_grey())
 
     for pname, entries in paths_to_show.items():
         if not entries:
